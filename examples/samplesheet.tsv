@@ -1,0 +1,5 @@
+sample_id	fastq_dir	chemistry	batch	donor	condition
+sample1	/path/to/fastq/sample1	10xv3	batch1	donor1	control
+sample2	/path/to/fastq/sample2	10xv3	batch1	donor2	treated
+sample3	/path/to/fastq/sample3	10xv3	batch2	donor1	control
+sample4	/path/to/fastq/sample4	10xv3	batch2	donor3	treated

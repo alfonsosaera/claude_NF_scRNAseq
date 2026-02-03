@@ -1,0 +1,10 @@
+{
+  "batch_key": "batch",
+  "neighbors_within_batch": 3,
+  "n_pcs": 50,
+  "n_hvgs": 3000,
+  "leiden_resolution": 1.0,
+  "umap_min_dist": 0.1,
+  "umap_spread": 1.0,
+  "umap_metric": "correlation"
+}

@@ -1,0 +1,19 @@
+{
+  "mt_prefix": "MT-",
+  "filters": {
+    "min_genes_per_cell": 200,
+    "max_genes_per_cell": null,
+    "min_counts_per_cell": 500,
+    "max_counts_per_cell": null,
+    "max_pct_mt": 20,
+    "min_cells_per_gene": 3
+  },
+  "run_doublets": true,
+  "n_hvgs": 3000,
+  "n_pcs": 50,
+  "normalization": {
+    "target_sum": 1e6
+  },
+  "hvg_flavor": "seurat_v3",
+  "pca_n_comps": 50
+}
