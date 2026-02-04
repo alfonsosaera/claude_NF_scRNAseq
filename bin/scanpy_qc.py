@@ -26,8 +26,12 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Set Scanpy settings
-sc.settings.verbosity = 3
-sc.settings.set_figure_params(dpi=100, facecolor='white')
+try:
+    sc.settings.verbosity = 3
+    sc.settings.set_figure_params(dpi=100, facecolor='white')
+except AttributeError:
+    # Older versions of scanpy may not have settings attribute
+    pass
 
 
 def load_qc_config(config_file: str) -> Dict:
@@ -45,7 +49,7 @@ def load_qc_config(config_file: str) -> Dict:
 def load_anndata(input_file: str) -> anndata.AnnData:
     """Load AnnData object from H5AD file."""
     try:
-        adata = sc.read_h5ad(input_file)
+        adata = anndata.read_h5ad(input_file)
         logger.info(f"Loaded AnnData from {input_file}: shape={adata.shape}")
         return adata
     except Exception as e:
@@ -57,11 +61,22 @@ def add_metadata(adata: anndata.AnnData, sample_id: str, metadata: Dict) -> annd
     """Add sample metadata to AnnData obs."""
     adata.obs['sample_id'] = sample_id
 
-    for key, value in metadata.items():
-        if key != 'sample_id':
-            adata.obs[key] = value
+    # Handle case where metadata might be a string instead of dict
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata)
+        except (json.JSONDecodeError, TypeError):
+            logger.warning(f"Could not parse metadata string: {metadata}")
+            return adata
 
-    logger.info(f"Added metadata to obs: {list(metadata.keys())}")
+    if isinstance(metadata, dict):
+        for key, value in metadata.items():
+            if key != 'sample_id':
+                adata.obs[key] = value
+        logger.info(f"Added metadata to obs: {list(metadata.keys())}")
+    else:
+        logger.warning(f"Metadata is not a dict or parseable string: {type(metadata)}")
+
     return adata
 
 
@@ -422,8 +437,15 @@ def main():
         config = load_qc_config(args.config)
         adata = load_anndata(args.input)
 
-        # Parse metadata
-        metadata = json.loads(args.metadata)
+        # Parse metadata - handle both JSON strings and already-parsed objects
+        try:
+            metadata = json.loads(args.metadata)
+            # If the result is still a string (double-quoted JSON), parse again
+            if isinstance(metadata, str):
+                metadata = json.loads(metadata)
+        except (json.JSONDecodeError, TypeError):
+            metadata = {}
+            logger.warning("Could not parse metadata JSON, using empty dict")
 
         # Add metadata
         adata = add_metadata(adata, args.sample_id, metadata)

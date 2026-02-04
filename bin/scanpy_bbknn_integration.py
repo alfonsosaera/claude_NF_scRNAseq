@@ -27,8 +27,12 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Set Scanpy settings
-sc.settings.verbosity = 3
-sc.settings.set_figure_params(dpi=100, facecolor='white')
+try:
+    sc.settings.verbosity = 3
+    sc.settings.set_figure_params(dpi=100, facecolor='white')
+except AttributeError:
+    # Older versions of scanpy may not have settings attribute
+    pass
 
 
 def load_bbknn_config(config_file: str) -> Dict:
@@ -48,7 +52,7 @@ def load_anndata_files(input_files: List[str]) -> List[anndata.AnnData]:
     adata_list = []
     for file_path in input_files:
         try:
-            adata = sc.read_h5ad(file_path)
+            adata = anndata.read_h5ad(file_path)
             logger.info(f"Loaded {Path(file_path).name}: shape={adata.shape}")
             adata_list.append(adata)
         except Exception as e:
@@ -94,12 +98,34 @@ def ensure_batch_metadata(adata: anndata.AnnData, batch_key: str) -> anndata.Ann
     return adata
 
 
+def clean_nans(adata: anndata.AnnData) -> anndata.AnnData:
+    """Remove genes with NaN values that can cause issues with HVG selection."""
+    # Check for NaN values in the expression matrix
+    if hasattr(adata.X, 'data'):  # sparse matrix
+        nan_genes = []
+        for i in range(adata.n_vars):
+            if np.isnan(adata.X[:, i].data).any():
+                nan_genes.append(i)
+    else:  # dense matrix
+        nan_mask = np.isnan(adata.X).any(axis=0)
+        nan_genes = np.where(nan_mask)[0].tolist()
+
+    if nan_genes:
+        logger.info(f"Found {len(nan_genes)} genes with NaN values, removing them")
+        adata = adata[:, ~adata.var_names.isin(adata.var_names[nan_genes])].copy()
+
+    return adata
+
+
 def recompute_hvg(adata: anndata.AnnData, config: Dict) -> anndata.AnnData:
     """Recompute HVGs on merged data."""
     n_hvgs = config.get('n_hvgs', 3000)
-    hvg_flavor = config.get('hvg_flavor', 'seurat_v3')
+    hvg_flavor = config.get('hvg_flavor', 'seurat')
 
-    # Use variable genes in raw counts
+    # Clean NaN values first to avoid HVG selection errors
+    adata = clean_nans(adata)
+
+    # Use variable genes - seurat flavor works well with log-normalized data
     sc.pp.highly_variable_genes(adata, flavor=hvg_flavor, n_top_genes=n_hvgs)
     logger.info(f"Selected {n_hvgs} HVGs on merged data using flavor '{hvg_flavor}'")
 
@@ -152,8 +178,18 @@ def compute_umap(adata: anndata.AnnData, config: Dict) -> anndata.AnnData:
     umap_spread = config.get('umap_spread', 1.0)
     umap_metric = config.get('umap_metric', 'correlation')
 
-    sc.tl.umap(adata, min_dist=umap_min_dist, spread=umap_spread, metric=umap_metric)
-    logger.info(f"Computed UMAP with min_dist={umap_min_dist}, spread={umap_spread}")
+    try:
+        # Try with metric parameter (older scanpy versions)
+        sc.tl.umap(adata, min_dist=umap_min_dist, spread=umap_spread, metric=umap_metric)
+        logger.info(f"Computed UMAP with min_dist={umap_min_dist}, spread={umap_spread}, metric={umap_metric}")
+    except TypeError as e:
+        # Fallback if metric parameter not supported (newer versions)
+        if 'metric' in str(e):
+            logger.warning(f"UMAP metric parameter not supported, computing without it: {e}")
+            sc.tl.umap(adata, min_dist=umap_min_dist, spread=umap_spread)
+            logger.info(f"Computed UMAP with min_dist={umap_min_dist}, spread={umap_spread}")
+        else:
+            raise
 
     return adata
 

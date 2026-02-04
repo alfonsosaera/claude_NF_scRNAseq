@@ -36,8 +36,14 @@ workflow {
     }
 
     // Parse samplesheet
-    ch_samples = PARSE_SAMPLESHEET(samplesheet_file)
-    ch_samples | view { "Sample: ${it[0]}, Chemistry: ${it[3]}" }
+    ch_parsed = PARSE_SAMPLESHEET(samplesheet_file)
+
+    // Convert parsed TSV to channel tuples
+    ch_samples = ch_parsed.samples
+        .splitCsv(header: false, sep: '\t')
+        .map { row ->
+            [row[0], file(row[1]), file(row[2]), row[3], row[4]]
+        }
 
     // Conditional: Build index
     if (params.run_mode in ['all', 'index_only']) {
@@ -63,7 +69,7 @@ workflow {
 
     // Conditional: Quantification
     if (params.run_mode in ['all', 'quant_only']) {
-        ch_quants = SIMPLEAF_QUANT(ch_index, ch_samples)
+        ch_quants = SIMPLEAF_QUANT(ch_index.index, ch_samples)
     } else if (params.run_mode in ['qc_only', 'integration_only']) {
         // For QC/integration-only modes, assume quants exist in work directory
         ch_quants = ch_samples.map { sample_id, fastq_r1, fastq_r2, chemistry, meta_map ->
@@ -79,7 +85,6 @@ workflow {
         }
 
         ch_qc = SCANPY_QC(ch_quants, qc_config)
-        ch_qc.filtered_adata | view { "QC filtered: ${it[0]}" }
     } else if (params.run_mode in ['integration_only']) {
         // For integration-only, assume QC files exist
         ch_qc = ch_samples.map { sample_id, fastq_r1, fastq_r2, chemistry, meta_map ->
@@ -100,7 +105,6 @@ workflow {
             .collect()
 
         ch_integrated = SCANPY_BBKNN(ch_merged, bbknn_config)
-        ch_integrated | view { "Integration completed" }
     }
 }
 
