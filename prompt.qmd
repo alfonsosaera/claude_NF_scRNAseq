@@ -1,0 +1,324 @@
+# Goal
+
+Implement a modular Nextflow DSL2 pipeline to process multiple 10x scRNA‑seq samples with simpleaf/alevin‑fry, perform Scanpy‑based QC per sample, and integrate samples with BBKNN.
+
+# Inputs
+
+- params.samplesheet: path to a TSV with at least:
+    - sample_id (unique)
+    - fastq_dir (or two columns fastq_r1, fastq_r2; pick one design and document it)
+    - chemistry (e.g. 10xv2, 10xv3, 10xv4-3p)
+    - optional metadata columns (e.g. donor, condition, batch, etc.)
+- params.fasta: path to reference FASTA (human).
+​- params.annotation: path to GTF/GFF annotation matching the FASTA.
+​- All extra samplesheet columns must be propagated as .obs metadata into the AnnData objects.
+​
+
+# Configurable parameters
+
+Expose these through nextflow.config (with sensible defaults):
+
+## General
+
+- params.outdir (default: results)
+- params.run_mode with allowed values:
+    - all (index + quant + per‑sample QC + integration)
+    - index_only
+    - quant_only
+    - qc_only (assumes existing alevin‑fry outputs)
+    - integration_only (assumes existing per‑sample .h5ad)
+
+## QC thresholds (read from config or a small YAML file)
+
+- min_genes_per_cell
+- max_genes_per_cell (optional, can be null)
+- min_counts_per_cell
+- max_counts_per_cell (optional, can be null)
+- max_pct_mt
+- min_cells_per_gene (optional)
+- Whether to filter ribosomal genes (boolean)
+
+## Mitochondrial gene flagging
+
+- params.mt_prefix with default "MT-" ​
+- In the Scanpy QC script, define:
+
+```python
+adata.var["mt"] = adata.var_names.str.startswith(config["mt_prefix"])
+```
+
+## Doublet detection
+
+- Boolean params.run_doublets (default: true).
+- Parameters specific to scDblFinder (e.g. expected doublet rate) can be passed in a small JSON/YAML, and the Python/R wrapper should read them.
+
+## BBKNN integration
+
+- params.bbknn_batch_key default "batch".
+- params.bbknn_neighbors_within_batch default 3.
+- params.bbknn_n_pcs default 50.
+- Hardcode BBKNN to use:
+
+```python
+sc.external.pp.bbknn(
+    adata,
+    batch_key=config["bbknn_batch_key"],
+    neighbors_within_batch=config["bbknn_neighbors_within_batch"],
+    n_pcs=config["bbknn_n_pcs"]
+)
+```
+
+# Environment and containers
+
+- Nextflow: newest stable, DSL2 enabled.
+​- simpleaf/alevin‑fry processes:
+    - container = "quay.io/biocontainers/simpleaf:0.19.5--ha6fb395_0"
+​- Scanpy/BBKNN/QC processes:
+    - container = params.scanpy_image ('will be defined later'; must contain Scanpy, BBKNN, scDblFinder and their deps).
+- Execution: local executor with configurable cpus, memory per process.
+
+# Directory structure
+
+Under params.outdir:
+- reference/ (from simpleaf index)
+    - index/ (or whatever simpleaf uses as output)
+- alevin_fry/<sample_id>/:
+    - Raw simpleaf/alevin‑fry outputs, including AF directory and quants.h5ad when using --anndata-out.
+- scanpy/qc/<sample_id>/:
+    - Filtered per‑sample .h5ad
+    - QC plots (PNG/PDF) for histograms, violins, and scatter plots.
+- integration/bbknn/:
+    - Merged post‑QC AnnData merged_bbknn.h5ad
+    - UMAP and clustering plots (e.g. colored by batch, sample, cluster).
+
+# High‑level workflow
+
+Use DSL2 modules; main workflow selects which modules to run depending on params.run_mode.
+
+## Module 1: Parse samplesheet
+
+- Input: params.samplesheet (TSV).
+- Output channel: tuples like:
+    - tuple sample_id, fastq_r1, fastq_r2, chemistry, meta_map
+    - where meta_map is a map from column name to value (all extra columns).
+
+## Module 2: simpleaf index
+
+- Run once per pipeline (unless params.run_mode excludes it).
+- Input: params.fasta, params.annotation.
+- Command:
+
+```bash
+simpleaf index \
+--fasta ${fasta} \
+--gtf ${annotation} \
+--output ${index_dir}
+```
+(Use default simpleaf index options as requested.)
+
+- Output: index_dir path to be broadcast to quantification processes.
+
+## Module 3: simpleaf quant
+
+- One process per sample.
+- Inputs:
+    - index_dir from Module 2 (or a pre‑existing index if not running index).
+    - sample_id, fastq_r1, fastq_r2, chemistry.
+- Command (defaults, scRNA‑seq only):
+
+```bash
+simpleaf quant \
+--index ${index_dir}/index \
+--reads1 ${fastq_r1} \
+--reads2 ${fastq_r2} \
+--chemistry ${chemistry} \
+--threads ${task.cpus} \
+--resolution cr-like \
+--unfiltered-pl \
+--anndata-out \
+--output ${outdir}/alevin_fry/${sample_id}
+```
+
+- Output:
+    - The AF quant directory, including af_quant/quants.h5ad (simpleaf’s Scanpy‑readable AnnData).
+    - Provide downstream channel: tuple sample_id, quants_h5ad_path, meta_map.
+
+## Module 4: per‑sample QC in Scanpy
+
+- One process per sample.
+- Input:
+    - quants_h5ad_path from Module 3 (or user‑provided if starting at QC)
+    - meta_map with sample metadata
+    - QC config file/params including thresholds and mt_prefix.
+- Python script outline:
+
+```python
+import scanpy as sc
+import anndata
+import json
+import pandas as pd
+import scDblFinder  # or R wrapper if needed
+
+# load config, e.g. from JSON
+with open("qc_config.json") as fh:
+    cfg = json.load(fh)
+
+adata = sc.read_h5ad("quants.h5ad")  # from simpleaf output []
+
+# add sample-level metadata to adata.obs
+meta = json.load(open("meta.json"))
+for key, val in meta.items():
+    adata.obs[key] = val
+
+# mitochondrial genes
+mt_prefix = cfg.get("mt_prefix", "MT-")
+adata.var["mt"] = adata.var_names.str.startswith(mt_prefix)
+
+# basic QC metrics
+sc.pp.calculate_qc_metrics(
+    adata,
+    qc_vars=["mt"],
+    percent_top=None,
+    log1p=False,
+    inplace=True
+)
+
+# filter cells
+qc = cfg["filters"]
+adata = adata[
+    (adata.obs["n_genes_by_counts"] >= qc["min_genes_per_cell"]) &
+    (adata.obs["total_counts"] >= qc["min_counts_per_cell"]) &
+    (adata.obs["pct_counts_mt"] <= qc["max_pct_mt"]),
+    :
+].copy()
+
+if qc.get("max_genes_per_cell") is not None:
+    adata = adata[adata.obs["n_genes_by_counts"] <= qc["max_genes_per_cell"], :].copy()
+
+if qc.get("max_counts_per_cell") is not None:
+    adata = adata[adata.obs["total_counts"] <= qc["max_counts_per_cell"], :].copy()
+
+# optional gene filtering
+if qc.get("min_cells_per_gene") is not None:
+    sc.pp.filter_genes(adata, min_cells=qc["min_cells_per_gene"])
+
+# doublet detection with scDblFinder (details depend on implementation)
+if cfg.get("run_doublets", True):
+    # here either call R-scDblFinder via rpy2 or run an external R script and merge results
+    pass
+
+# normalization and log1p
+sc.pp.normalize_total(adata)   # default behaviour [][]
+sc.pp.log1p(adata)
+
+# highly variable genes
+sc.pp.highly_variable_genes(
+    adata,
+    flavor="seurat_v3",
+    n_top_genes=cfg.get("n_hvgs", 3000),
+    subset=True
+)
+
+# PCA (per-sample PCA; later we will recompute on merged)
+sc.pp.scale(adata, max_value=10)
+sc.tl.pca(adata, n_comps=cfg.get("n_pcs", 50))
+
+# save filtered QC'd per-sample h5ad
+adata.write_h5ad("sample_qc.h5ad")
+```
+
+- Plots (per sample), saved to scanpy/qc/<sample_id>/:
+    - Histograms:
+        - n_genes_by_counts
+        - total_counts
+        - pct_counts_mt.
+    - Violin plots for same metrics:
+
+```python
+sc.pl.violin(adata, ["n_genes_by_counts", "total_counts", "pct_counts_mt"], save="_qc_violin.png")
+```
+
+    - Scatter plot total UMIs vs total genes:
+
+```python
+sc.pl.scatter(adata, x="total_counts", y="n_genes_by_counts", save="_counts_vs_genes.png")
+```
+
+## Module 5: merge and BBKNN integration
+
+- Input: all per‑sample sample_qc.h5ad files.
+- Merge strategy:
+    - Recommended default: concatenate first, then recompute HVGs and PCA jointly (this is the standard “integrate after joint PCA” approach, and matches how BBKNN is designed to slot in as a drop‑in for sc.pp.neighbors).
+
+- Python script outline:
+
+```python
+import scanpy as sc
+import anndata
+import json
+
+# list of per-sample h5ad paths provided by Nextflow
+paths = [...]
+adatas = [sc.read_h5ad(p) for p in paths]
+
+# ensure all have 'batch' key in obs; if not, create from sample id
+for adata, path in zip(adatas, paths):
+    if "batch" not in adata.obs.columns:
+        sample_id = ...  # derive from filename
+        adata.obs["batch"] = sample_id
+
+merged = adatas.concatenate(
+    *adatas[1:],
+    batch_key="batch",
+    index_unique="-"
+)
+
+cfg = json.load(open("bbknn_config.json"))
+
+# recompute HVGs on merged data
+sc.pp.highly_variable_genes(
+    merged,
+    flavor="seurat_v3",
+    n_top_genes=cfg.get("n_hvgs", 3000),
+    subset=True
+)
+
+# scale and PCA
+sc.pp.scale(merged, max_value=10)
+sc.tl.pca(merged, n_comps=cfg.get("n_pcs", 50))
+
+# BBKNN neighbours
+import scanpy.external as sce
+
+sce.pp.bbknn(
+    merged,
+    batch_key=cfg.get("batch_key", "batch"),
+    neighbors_within_batch=cfg.get("neighbors_within_batch", 3),
+    n_pcs=cfg.get("n_pcs", 50)
+)
+
+# UMAP and Leiden clustering
+sc.tl.umap(merged)
+sc.tl.leiden(merged, resolution=cfg.get("leiden_resolution", 1.0))
+
+merged.write_h5ad("merged_bbknn.h5ad")
+
+# basic plots
+sc.pl.umap(merged, color=["batch"], save="_by_batch.png")
+sc.pl.umap(merged, color=["leiden"], save="_by_cluster.png")
+```
+
+# Nextflow implementation details
+
+- Use DSL2 module files:
+    - modules/simpleaf_index.nf
+    - modules/simpleaf_quant.nf
+    - modules/scanpy_qc.nf
+    - modules/scanpy_bbknn_integration.nf
+- Each module:
+    - Declares container (simpleaf vs Scanpy image).
+    - Uses input: and output: blocks with channels typed as tuples.
+- Main workflow:
+    - Reads samplesheet, builds a channel of sample metadata.
+    - Conditional execution based on params.run_mode using if blocks or when: in processes.
+    - Ensures the index is built at most once and broadcast via index_ch.broadcast() to quant processes.
