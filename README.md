@@ -1,8 +1,7 @@
 # Nextflow DSL2 scRNA-seq Pipeline
 
 > This pipeline was built as an exercise to test Claude Code on building NextFlow pipelines as<br>
-> show in this [blog post](https://lovednacodeblog.com/post/2026-02-10-claude-nf-simpleaf/). I did not<br>
-> review the single cell analysis code.<br>
+> show in this [blog post](https://lovednacodeblog.com/post/2026-02-10-claude-nf-simpleaf/). The single cell analysis code was AI generated and I did not review it.<br>
 > Feel free to modify and use this pipeline if you wish.
 
 A modular Nextflow pipeline for processing 10x scRNA-seq data with:
