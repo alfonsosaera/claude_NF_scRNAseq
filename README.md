@@ -1,5 +1,10 @@
 # Nextflow DSL2 scRNA-seq Pipeline
 
+> This pipeline was built as an exercise to test Claude Code on building NextFlow pipelines as<br>
+> show in this [blog post](https://lovednacodeblog.com/post/2026-02-10-claude-nf-simpleaf/). I did not<br>
+> review the single cell analysis code.<br>
+> Feel free to modify and use this pipeline if you wish.
+
 A modular Nextflow pipeline for processing 10x scRNA-seq data with:
 - **Quantification**: simpleaf/alevin-fry for rapid quantification
 - **Per-sample QC**: Scanpy-based quality control, filtering, and normalization
