@@ -9,6 +9,8 @@ A modular Nextflow pipeline for processing 10x scRNA-seq data with:
 - **Per-sample QC**: Scanpy-based quality control, filtering, and normalization
 - **Batch Integration**: BBKNN for batch-corrected integration
 
+![Pipeline diagram](claude.pipeline.png)
+
 ## Features
 
 - ✅ Modular DSL2 design with independent processes
